@@ -1,0 +1,55 @@
+[Unit]
+Description=IBM Content Manager REST API Integration Daemon
+After=network.target
+
+[Service]
+Type=simple
+# Replace 'your_user' and 'your_group' with the actual user and group
+# the daemon should run as on the target system.
+User=your_user
+Group=your_group
+
+# Replace '/opt/cm-daemon' with the actual directory where the application
+# is deployed. This path is critical for relative path configurations
+# (like for config/config.json or logs/daemon.log if not absolute)
+# and for locating the main.py script.
+WorkingDirectory=/opt/cm-daemon
+
+# Replace '/usr/bin/python3' with the actual path to the Python 3 interpreter
+# on the target system, if different.
+# The second path should be the full path to the main.py script
+# relative to the deployment directory specified in WorkingDirectory.
+ExecStart=/usr/bin/python3 /opt/cm-daemon/daemon/main.py
+
+Restart=on-failure
+RestartSec=5s
+
+# Standard output and error logging options for systemd:
+# By default, stdout and stderr from the daemon (e.g., print statements,
+# unhandled exceptions before logging is set up) are sent to journald.
+# Use 'journalctl -u cm-daemon.service' to view these.
+# The daemon's own file logging (to logs/daemon.log) will continue as configured
+# within the application.
+
+# If you prefer to redirect systemd's stdout/stderr to specific files
+# (though journald is often preferred for system services):
+# StandardOutput=append:/var/log/cm-daemon/cm-daemon.out.log
+# StandardError=append:/var/log/cm-daemon/cm-daemon.err.log
+# Ensure the target log directory (e.g., /var/log/cm-daemon) exists and
+# is writable by the specified User/Group.
+
+# Environment variables can be set here if needed.
+# PYTHONUNBUFFERED=1 is often recommended for Python applications writing to stdout/stderr
+# to ensure output is not heavily buffered and appears in logs promptly.
+# This is also set in the Dockerfile for containerized execution.
+Environment="PYTHONUNBUFFERED=1"
+
+# If you need to override the default config path detection in daemon/main.py,
+# you could potentially set an environment variable here that main.py is modified to read.
+# For example:
+# Environment="APP_CONFIG_PATH=/opt/cm-daemon/config/config.json"
+# (The daemon currently loads config relative to its own path, which should work
+# correctly if WorkingDirectory is set properly.)
+
+[Install]
+WantedBy=multi-user.target
