@@ -1,8 +1,11 @@
 import requests
 import time
 import logging
-import os # Added
-import json # Added
+import os
+import json
+import subprocess
+import sys
+import re
 from datetime import datetime, timedelta
 
 logger = logging.getLogger(__name__)
@@ -14,97 +17,88 @@ class CMConnectionError(requests.exceptions.RequestException):
 class CMClient:
     def __init__(self, api_base_url, auth_config):
         self.api_base_url = api_base_url.rstrip('/')
-        self.auth_config = auth_config
-        self._bearer_token = auth_config.get("bearer_token")
-        self._token_renews_at = datetime.now() # Placeholder, will be updated after first actual renewal or if expiry is known
+        self.auth_config = auth_config # Retain for default_token_validity_seconds etc.
+        self._bearer_token = None # Initialize to None
+        self._token_renews_at = datetime.now() - timedelta(seconds=1) # Force initial fetch
         self._session = requests.Session()
-        # It's good practice to set default headers, like User-Agent
         self._session.headers.update({"User-Agent": "CMDaemon/1.0"})
         
-        # Estimate token expiry if possible, or set a short default to force early renewal check
-        # This is a simplistic approach. A more robust solution would parse the token for expiry if available.
         self.token_expiry_threshold_seconds = auth_config.get("token_expiry_threshold_seconds", 300)
-        # Assume token is valid for a certain period if not explicitly known, e.g. 1 hour.
-        # This is a placeholder; real token lifetime should be known or discoverable.
-        self._token_valid_duration_seconds = auth_config.get("initial_token_validity_seconds", 3600) 
-        self._update_renewal_time(initial_setup=True)
+        # default_token_validity_seconds is used in _update_renewal_time if script doesn't provide expiry
+        self.default_token_validity_seconds = auth_config.get("default_token_validity_seconds", 3600)
 
     def _update_renewal_time(self, new_token_lifetime_seconds=None, initial_setup=False):
-        if initial_setup:
-            # On initial setup, if we have a pre-existing token, we don't know its actual expiry.
-            # We assume it's valid for a certain duration or needs immediate renewal check.
-            # For safety, set renewal time to be in the past to trigger check/renewal on first use.
+        if initial_setup: # This case might become less relevant if token is always fetched initially
             self._token_renews_at = datetime.now() - timedelta(seconds=1)
-            logger.info("Initial token setup. Renewal time set to trigger check on first API call.")
+            logger.info("Initial token setup. Renewal check forced on first API call.")
         else:
-            # After a successful renewal, the new token's lifetime is used.
-            lifetime = new_token_lifetime_seconds if new_token_lifetime_seconds is not None else self._token_valid_duration_seconds
+            # Assume a fixed lifetime if not provided, e.g., 1 hour, since get_token.py doesn't give expiry.
+            lifetime = new_token_lifetime_seconds if new_token_lifetime_seconds is not None else self.default_token_validity_seconds
+            # self.token_expiry_threshold_seconds is how early we try to renew before actual expiry
             self._token_renews_at = datetime.now() + timedelta(seconds=lifetime - self.token_expiry_threshold_seconds)
-            logger.info(f"Token renewal time updated. Next check/renewal around: {self._token_renews_at}")
+            logger.info(f"Token renewal time updated. Next check/renewal around: {self._token_renews_at}. Assumed lifetime: {lifetime}s.")
 
     def _is_token_expiring(self):
         return datetime.now() >= self._token_renews_at
 
-    def _refresh_token(self):
-        renewal_url = self.auth_config.get("token_renewal_url")
-        if not renewal_url:
-            logger.error("Token renewal URL is not configured.")
+    def _fetch_new_token_from_script(self):
+        logger.info("Attempting to fetch new token using get_token.py script.")
+        # Construct path to get_token.py assuming it's in the project root (parent of 'daemon' directory)
+        script_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'get_token.py'))
+
+        if not os.path.exists(script_path):
+            logger.error(f"get_token.py script not found at {script_path}")
             return False
-
-        # Actual token renewal mechanism.
-        # Assuming a POST request, and the new token is in an 'access_token' field,
-        # and 'expires_in' field for its lifetime in seconds in the JSON response.
-        try:
-            logger.info(f"Attempting to refresh token from {renewal_url}...")
-            # Depending on the auth mechanism, might need to send client_id/secret, or old token for refresh grant.
-            # This example assumes no specific body is needed, or it's handled by stored session auth.
-            response = self._session.post(renewal_url, timeout=10) 
-            response.raise_for_status() # Raises HTTPError for bad responses
-            
-            token_data = response.json()
-            new_token = token_data.get("access_token")
-            new_lifetime = token_data.get("expires_in") # In seconds
-
-            if not new_token:
-                logger.error("Token renewal response did not contain 'access_token'. Full response: %s", response.text)
-                return False
-            
-            self._bearer_token = new_token
-            logger.info("Successfully refreshed bearer token.")
-            self._update_renewal_time(new_token_lifetime_seconds=new_lifetime) # new_lifetime can be None
-            return True
-            
-        except requests.exceptions.HTTPError as e:
-            logger.error(f"HTTP error refreshing token from {renewal_url}: {e.response.status_code} {e.response.text}")
-            # If 401/403, could mean refresh token itself is invalid/expired.
-        except requests.exceptions.ConnectionError as e:
-            logger.error(f"Connection error refreshing token from {renewal_url}: {e}")
-        except requests.exceptions.Timeout as e:
-            logger.error(f"Timeout refreshing token from {renewal_url}: {e}")
-        except requests.exceptions.RequestException as e: # Catch-all for other request issues
-            logger.error(f"Error refreshing token from {renewal_url}: {e}")
-        except ValueError as e: # Includes JSONDecodeError
-            logger.error(f"Error parsing token renewal JSON response from {renewal_url}: {e}. Response text: {response.text if 'response' in locals() else 'N/A'}")
         
-        return False
+        command = [sys.executable, script_path]
+        try:
+            result = subprocess.run(command, capture_output=True, text=True, timeout=30, check=False)
+            
+            if result.returncode != 0:
+                logger.error(f"get_token.py script failed with exit code {result.returncode}.")
+                logger.error(f"Stderr: {result.stderr}")
+                return False
+
+            # Parse stdout for the token
+            # Expected output: "Successfully extracted Bearer Token: <token>" or "Successfully extracted Bearer Token from JSON response: <token>"
+            match = re.search(r"Successfully extracted Bearer Token(?: from JSON response)?: (.+)", result.stdout)
+            if match:
+                extracted_token = match.group(1).strip()
+                if extracted_token:
+                    logger.info("Successfully fetched new token from script.")
+                    self._bearer_token = extracted_token
+                    self._update_renewal_time() # Use default lifetime
+                    return True
+                else:
+                    logger.error("Token script output matched, but token was empty.")
+                    return False
+            else:
+                logger.error(f"Could not find token in get_token.py output. Stdout: {result.stdout}")
+                return False
+
+        except subprocess.TimeoutExpired:
+            logger.error(f"Timeout running get_token.py script at {script_path}.")
+            return False
+        except Exception as e:
+            logger.error(f"An unexpected error occurred while running get_token.py: {e}")
+            return False
 
     def get_bearer_token(self):
         if not self._bearer_token or self._is_token_expiring():
-            logger.info("Bearer token is missing or expiring. Attempting to refresh.")
-            if not self._refresh_token():
-                logger.error("Failed to refresh bearer token. Subsequent API calls may fail.")
-                # Depending on policy, could raise an exception here
+            logger.info("Bearer token is missing or expiring. Attempting to fetch new token from script.")
+            if not self._fetch_new_token_from_script(): # Changed from _refresh_token
+                logger.error("Failed to fetch new bearer token from script. Subsequent API calls may fail.")
         return self._bearer_token
 
     def _request(self, method, endpoint, **kwargs):
+        retried_after_auth_failure = kwargs.pop('_retried_after_auth_failure', False)
         token = self.get_bearer_token()
+
         if not token:
-            # If token couldn't be obtained/refreshed, we might not want to proceed.
             logger.error("Cannot make API request: No valid bearer token.")
-            # Or raise an exception: raise Exception("API request failed: No valid token")
             return None 
 
-        headers = kwargs.pop("headers", {}) # Take out headers from kwargs if provided
+        headers = kwargs.pop("headers", {})
         headers["Authorization"] = f"Bearer {token}"
         # Accept header can be overridden by kwargs if needed for specific requests
         headers.setdefault("Accept", "application/json")
@@ -162,15 +156,28 @@ class CMClient:
             raise CMConnectionError(f"Timeout during API request to {url}: {e}") from e
         except requests.exceptions.HTTPError as e:
             logger.error(f"HTTP error during API request to {url}: {e.response.status_code} {e.response.text}")
+            if e.response.status_code == 401 and not retried_after_auth_failure:
+                logger.warning("Authentication failed (401). Attempting to fetch a new token and retry.")
+                self._bearer_token = None # Invalidate old token
+                self._token_renews_at = datetime.now() - timedelta(seconds=1) # Force expiry check
+                
+                new_token = self.get_bearer_token() # This will attempt to fetch
+                if new_token:
+                    logger.info("Retrying the original request with a new token.")
+                    kwargs['_retried_after_auth_failure'] = True # Mark that we've retried
+                    return self._request(method, endpoint, **kwargs) # Recursive call
+                else:
+                    logger.error("Failed to obtain a new token after 401. Propagating original 401 error.")
+                    # Fall through to raise CMConnectionError or return None as per original logic for non-5xx
+            
             if e.response.status_code in [500, 502, 503, 504]: # Server-side issues
                 raise CMConnectionError(f"CM Server Error ({e.response.status_code}) for {url}: {e.response.text}") from e
-            # For other HTTP errors (e.g. 4xx), they are logged, but _request will return None implicitly.
-            # This allows callers to differentiate between 'CM down' and 'bad request/auth'
-        except requests.exceptions.RequestException as e: # Catch-all for other request issues
+            # For other 4xx errors, or 401 on retry, they are logged, and _request will return None.
+        except requests.exceptions.RequestException as e: # Catch-all for other request issues including ConnectionError, Timeout
             logger.error(f"Generic error during API request to {url}: {e}")
             raise CMConnectionError(f"Generic request error for {url}: {e}") from e
         
-        return None # Returns None if an HTTPError (not re-raised as CMConnectionError) occurred, or other non-raising error
+        return None
 
     # --- Document Operations ---
 
@@ -386,18 +393,22 @@ class CMClient:
             # this method needs a clearer signal from _request.
             # Given the ambiguity, treating "None" as "not a success with a body" is safer.
             # The log in _request for 4xx errors would be the primary indicator of client errors.
-            # If _request could return the status code, this would be easy:
-            # data, status = self._request(...); if status == 200 or status == 204: return True
-            
-            # Based on current _request, if it's None, it means either 204 (good) or 4xx (bad)
-            # We'll assume if no exception was raised, and no JSON body, it's not a success we can confirm with data.
-            # This means a successful 204 might be reported as a failure by this function.
-            # This is a known limitation of the current _request return contract.
-            # A more robust solution would involve _request returning status codes or more structured error info.
-            # For now, let's stick to: if we get a JSON body, it's success. Otherwise, it's treated as failure here.
+            # The _request method returns the JSON response for 200/201 with JSON body,
+            # raw content for other successful responses, or None for 204 No Content
+            # or if a non-CMConnectionError HTTP error (like 4xx) occurred.
+            if response_json is not None: # Typically means 200 OK with JSON body
+                logger.info(f"Successfully updated metadata for document '{actual_doc_id}'. Response: {str(response_json)[:200]}")
+                return True
             else:
-                logger.warning(f"Update metadata for document '{actual_doc_id}' did not return a JSON body. Assuming not explicitly successful. Check logs for details (e.g. 204 No Content, or client error 4xx).")
-                return False
+                # If _request returned None, it could be a successful 204 No Content,
+                # or a 4xx client error that was logged by _request but not raised as CMConnectionError.
+                # For PUT, a 204 is a success. We assume if no exception was raised,
+                # and no data returned, it's a 204-like success.
+                # Critical errors (5xx, connection issues, timeouts) would have raised CMConnectionError.
+                # 401s are retried. Other 4xx are logged in _request.
+                # This isn't perfect but aligns with common PUT success patterns (200 or 204).
+                logger.info(f"Update metadata for document '{actual_doc_id}' completed without error and no JSON body returned. Assuming 204 No Content success. Check logs for any 4xx errors if issues persist.")
+                return True # Optimistically assume success if no exception and no body (likely 204)
         except CMConnectionError as e:
             logger.error(f"Connection error updating metadata for document '{actual_doc_id}': {e}")
             return False
