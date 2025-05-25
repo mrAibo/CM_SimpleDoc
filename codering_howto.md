@@ -204,14 +204,3 @@ db_user, db_pass = get_database_credentials()
 # Connect to database using credentials...
 ```
 
-## Contributing
-
-When contributing to this script:
-1. Maintain backward compatibility with existing configuration files
-2. Add comprehensive error handling for new features
-3. Update documentation for any new configuration options
-4. Test on multiple platforms if possible
-
-## License
-
-[Add your license information here]
