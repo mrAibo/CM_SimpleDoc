@@ -1,0 +1,109 @@
+Secure Password Management with keyring
+This project uses the keyring library to securely store and retrieve sensitive passwords, avoiding plaintext storage in configuration files.
+
+Prerequisites:
+
+Install keyring library:
+
+pip install keyring
+Ensure this is added to your project's requirements.txt.
+
+Install a Keyring Backend: The keyring library requires a backend service on your system.
+
+Linux (e.g., SLES 15, Ubuntu): GNOME Keyring is commonly used. KWallet is another option.
+# For systems using zypper (like SLES)
+sudo zypper install gnome-keyring libsecret-tools
+
+# For systems using apt (like Debian/Ubuntu)
+sudo apt-get install gnome-keyring gir1.2-secret-1
+macOS: Keychain is built-in and usually works out-of-the-box.
+Windows: Windows Credential Manager is built-in.
+For headless server environments (like SLES 15 server), ensure the gnome-keyring-daemon is started and a default keyring is available and unlocked for the user account running the application. This might involve PAM configuration (e.g., ensuring pam_gnome_keyring.so is active for the relevant services like sshd or login) or other D-Bus session setup.
+
+Storing Your CM Password
+Before the application can fetch CM tokens, you must store your CM password in the system keyring. Use the set_cm_password.py script for this:
+
+Steps:
+
+Locate config/credentials.json: This file contains the configuration needed by set_cm_password.py, specifically service_name and keyring_username. It should look like this:
+
+{
+    "username": "lsadmin",
+    "servername": "lsdb",
+    "login_url": "http://10.137.210.95:9082/cm8app/cm8rest/v1/login",
+    "login_host": "10.137.210.95",
+    "service_name": "CM8DaemonLogin",
+    "keyring_username": "cm8_lsadmin_daemon"
+}
+The set_cm_password.py script will use service_name and keyring_username to store the password. The username field is the actual CM login username.
+
+Run set_cm_password.py: Open your terminal and navigate to the project root directory.
+
+python set_cm_password.py
+The script will first try to load configuration from config/credentials.json located in a config subdirectory relative to the script.
+It will display the Service Name and Keyring Username it intends to use.
+If a password already exists for this combination, it will warn you and ask if you want to overwrite it.
+It will then securely prompt you to enter the password for your CM user (e.g., lsadmin).
+You'll be asked to confirm the password.
+If successful, it will confirm that the password has been stored.
+Example Usage:
+
+$ python set_cm_password.py
+CM Password Setup for Keyring
+-----------------------------
+Enter path to credentials config file (default: /path/to/your/project/config/credentials.json):
+Service Name: CM8DaemonLogin
+Keyring Username: cm8_lsadmin_daemon
+
+Enter password for 'cm8_lsadmin_daemon' on service 'CM8DaemonLogin':
+Confirm password:
+
+Password stored successfully in the system keyring!
+You can verify by trying to retrieve it (e.g., using 'python -m keyring get CM8DaemonLogin cm8_lsadmin_daemon')
+Verification (Optional): You can verify that the password was stored using the keyring command-line utility (if your keyring installation provides it) or a small Python snippet:
+
+python -m keyring get YOUR_SERVICE_NAME YOUR_KEYRING_USERNAME
+Replace YOUR_SERVICE_NAME and YOUR_KEYRING_USERNAME with the values from your config/credentials.json (e.g., CM8DaemonLogin and cm8_lsadmin_daemon). It should print the password if stored correctly.
+
+Important:
+
+Run set_cm_password.py as the same user that the daemon application will run under. This ensures the password is stored in the correct user's keyring.
+If the keyring is locked, you might be prompted for your system login password to unlock it during the storage process.
+Running Unit Tests
+The project includes unit tests to verify functionality.
+
+Prerequisites:
+
+Ensure all dependencies from requirements.txt are installed (including requests and keyring).
+Test Scripts:
+
+tests/test_get_token.py: Tests the get_token.py script, focusing on:
+
+Token extraction from various server responses.
+Loading credentials from config/credentials.json.
+Interaction with the keyring library (mocked) for password retrieval.
+Error handling.
+tests/daemon/test_cm_client.py: Tests the daemon/cm_client.py module, focusing on:
+
+Fetching tokens by calling get_token.py (mocking subprocess.run).
+Authentication retry logic (e.g., after a 401 error).
+Error handling for CM connection issues.
+How to Run Tests:
+
+Navigate to the project root directory.
+
+Run all tests using unittest discovery:
+
+python -m unittest discover -s tests
+Or, to be more verbose:
+
+python -m unittest discover -s tests -v
+Run specific test files:
+
+python -m unittest tests.test_get_token
+python -m unittest tests.daemon.test_cm_client
+Run specific test classes or methods:
+
+python -m unittest tests.test_get_token.TestGetToken
+python -m unittest tests.test_get_token.TestGetToken.test_fetch_token_success_plain_text
+The tests are designed to run without needing a live CM server or a pre-configured keyring password (as these are mocked). They ensure the logic of the scripts and client library behaves as expected under various conditions.
