@@ -1,0 +1,25 @@
+{
+  "cm_api": {
+    "endpoint": "http://your-cm-api-host/cm8app/cm8rest/v1",
+    "servername": "your_cm_server_name",
+    "username": "your_username",
+    "password": "your_password"
+  },
+  "directories_to_scan": [
+    {
+      "path": "/mnt/source_docs/department_a",
+      "item_type_name_create": "DeptADoc",
+      "item_type_name_update": "DeptADocUpdate"
+    },
+    {
+      "path": "/mnt/source_docs/department_b",
+      "item_type_name_create": "DeptBDoc",
+      "item_type_name_update": "DeptBDoc"
+    }
+  ],
+  "logging": {
+    "log_file_path": "logs/daemon.log",
+    "level": "INFO"
+  },
+  "failed_archive_path": "failed_archive"
+}
